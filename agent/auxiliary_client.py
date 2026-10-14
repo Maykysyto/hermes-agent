@@ -1038,6 +1038,26 @@ def _select_pool_entry(provider: str) -> tuple[bool, Optional[Any]]:
         return True, None
 
 
+def _select_pool_entry_for_model(provider: str, model: str) -> tuple[bool, Optional[Any]]:
+    """``_select_pool_entry`` scoped to *model*, like the chat path's ``pool.select(model=...)``.
+
+    Unscoped selection treats ANY active model cooldown as blocking (``model_cooldown_until(e, None)``),
+    so a per-model entitlement bench (#71970) on one model would hide the credential from aux tasks
+    that run a different model."""
+    pool = _load_pool_with_credentials(provider)
+    if pool is None:
+        # No pool to scope: same answer as the unscoped selector (keeps its seam for callers/tests).
+        return _select_pool_entry(provider)
+    try:
+        try:
+            return True, pool.select(model=model)
+        except TypeError:
+            return True, pool.select()  # pool without per-model selection
+    except Exception as exc:
+        logger.debug("Auxiliary client: could not select pool entry for %s (%s): %s", provider, model, exc)
+        return True, None
+
+
 def _peek_pool_entry(provider: str, pool: Any = None) -> Optional[Any]:
     """Best-effort current/next pool entry without mutating selection order.
 
@@ -2101,13 +2121,19 @@ def _resolve_xai_oauth_for_aux() -> Optional[tuple[str, str]]:
     return _creds_pair(creds)
 
 
-def _resolve_codex_credential_and_base() -> tuple[Optional[str], str]:
+def _resolve_codex_credential_and_base(model: Optional[str] = None) -> tuple[Optional[str], str]:
     """``(token, base_url)`` taken from ONE authority, so a Codex key is only ever sent to the host
     it belongs to (#121486): the profile-scoped ``HERMES_CODEX_BASE_URL`` wins; otherwise a pooled
     key goes where that pool entry routes (row URL / ``model.base_url``) and the auth.json OAuth
-    token goes to the ChatGPT default. ``(None, <base>)`` without a usable token."""
+    token goes to the ChatGPT default. ``(None, <base>)`` without a usable token.
+
+    ``model`` is the model the token will serve: select for that model first, so an available
+    unscoped row cannot bypass its model-specific bench. Singleton authority is unchanged."""
     override = _codex_base_url_override()
-    pool_present, entry = _select_pool_entry("openai-codex")
+    if model:
+        pool_present, entry = _select_pool_entry_for_model("openai-codex", model)
+    else:
+        pool_present, entry = _select_pool_entry("openai-codex")
     if pool_present:
         token = _pool_runtime_api_key(entry)
         if token:
@@ -2963,13 +2989,14 @@ def _build_codex_client(model: str) -> tuple[Optional[Any], Optional[str]]:
 
     No auto-selected default: the Codex model allow-list is undocumented and drifts.
     """
+    model = _normalize_resolved_model(model, "openai-codex") or ""
     if not model:
         logger.warning(
             "Auxiliary client: openai-codex requested without a model; "
             "pass model explicitly (auxiliary.<task>.model in config.yaml)."
         )
         return None, None
-    codex_token, base_url = _resolve_codex_credential_and_base()
+    codex_token, base_url = _resolve_codex_credential_and_base(model)
     if not codex_token:
         return None, None
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
@@ -4669,7 +4696,8 @@ def _try_discovery_chain() -> tuple[Optional[OpenAI], Optional[str], str]:
 
 
 def _resolve_auto_route(
-    main_runtime: Optional[dict[str, Any]] = None, task: Optional[str] = None
+    main_runtime: Optional[dict[str, Any]] = None, task: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> tuple[Optional[OpenAI], Optional[str], str]:
     """Full auto-detection chain, including the selected provider identity. Priority: (1) main provider +
     main model, regardless of provider type ("auto" means "my main model for side tasks too"; explicit
@@ -4681,6 +4709,11 @@ def _resolve_auto_route(
     runtime = _normalize_main_runtime(main_runtime)
     _warn_stale_openai_base_url(runtime.get("provider", ""))
     main_provider, main_model, base_url, api_key, api_mode = _main_route_target(runtime, task)
+    main_model = _normalize_resolved_model(main_model, main_provider) or ""
+    override_model = _normalize_resolved_model(model, main_provider)
+    # Keep the foreign vendor/model guard after normalizing recognized aliases.
+    if override_model and not ("/" in override_model and main_model and "/" not in main_model):
+        main_model = override_model
     routed = _try_main_provider_route(main_provider, main_model, base_url, api_key, api_mode)
     if routed is not None:
         return routed
@@ -4990,17 +5023,12 @@ def _route_or_warn(req: _ResolveRequest, client: Any, default: Optional[str], un
 
 def _resolve_auto_branch(req: _ResolveRequest) -> _ResolveResult:
     """Auto: try all providers in priority order; tag the client with the effective provider (survives cache reuse)."""
-    client, resolved, effective_provider = _resolve_auto_route(main_runtime=req.main_runtime, task=req.task)
+    client, resolved, effective_provider = _resolve_auto_route(
+        main_runtime=req.main_runtime, task=req.task, model=req.model)
     if client is None:
         return None, None
-    model = req.model
-    # An OpenRouter-format model override won't work on a non-OpenRouter provider (e.g. local
-    # server); drop it for the provider's default.
-    if model and "/" in model and resolved and "/" not in resolved:
-        logger.debug("Dropping OpenRouter-format model %r for non-OpenRouter "
-                     "auxiliary provider (using %r instead)", model, resolved)
-        model = None
-    routed_client, routed_model = _route_client(req, client, model or resolved)
+    # The selected route owns its model, including declared fallbacks.
+    routed_client, routed_model = _route_client(req, client, resolved)
     if routed_client is not None and effective_provider:
         try:
             routed_client._hermes_aux_effective_provider = effective_provider
@@ -5043,7 +5071,7 @@ def _resolve_nous_branch(req: _ResolveRequest) -> _ResolveResult:
 
 def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
     """OpenAI Codex (OAuth → Responses API)."""
-    model = req.model
+    model = _normalize_resolved_model(req.model, req.provider)
     if not model:
         logger.warning("resolve_provider_client: openai-codex requested without a "
                        "model; pass model explicitly (e.g. model.model in config.yaml "
@@ -5052,7 +5080,7 @@ def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
     no_token_msg = "resolve_provider_client: openai-codex requested but no Codex OAuth token found (run: hermes model)"
     if req.raw_codex:
         # Raw OpenAI client for callers needing responses.stream() (main agent loop).
-        codex_token, base_url = _resolve_codex_credential_and_base()
+        codex_token, base_url = _resolve_codex_credential_and_base(model)
         if not codex_token:
             logger.warning(no_token_msg)
             return None, None
@@ -5609,7 +5637,8 @@ def _vision_main_provider_client(
     # A provider vision default (static override or catalog discovery) is a *known* multimodal
     # model; the pinned chat model usually isn't, so only fall back to it when no default exists.
     provider_vision_default = _resolve_provider_vision_default(main_provider)
-    vision_model = provider_vision_default or main_model
+    vision_model = _normalize_resolved_model(
+        resolved_model or provider_vision_default or main_model, main_provider) or ""
     if main_provider == "nous":
         # Nous picks its vision model from Portal tier-aware slots inside _try_nous(vision=True);
         # passing the chat model would override that and 404. Only auxiliary.vision.model may.
@@ -5666,14 +5695,14 @@ def _vision_auto_route(
     if main_provider and main_provider not in {"auto", "", "moa"}:
         client, default_model = _vision_main_provider_client(main_provider, main_model, runtime, resolved_model, resolved_api_mode)
         if client is not None:
-            return _finalize_vision_client(main_provider, client, default_model, resolved_model, async_mode)
+            return _finalize_vision_client(main_provider, client, default_model, None, async_mode)
     # Aggregators use their dedicated vision model, not the user's main model.
     for candidate in _VISION_AUTO_PROVIDER_ORDER:
         if candidate == main_provider:
             continue  # already tried above
         sync_client, default_model = _resolve_strict_vision_backend(candidate)
         if sync_client is not None:
-            return _finalize_vision_client(candidate, sync_client, default_model, resolved_model, async_mode)
+            return _finalize_vision_client(candidate, sync_client, default_model, None, async_mode)
     logger.debug("Auxiliary vision client: none available")
     return None, None, None
 
@@ -6024,6 +6053,7 @@ def _get_cached_client(
     previously occurred in long-running gateways where recycled worker threads created unbounded entries
     (#10200).
     """
+    route_owned_model = _normalize_aux_provider(provider) in {"auto", "openai-codex"}
     # A bare llama.cpp alias keys on the live local endpoint: a restarted server (new port/key)
     # must not be served the old client, and a stopped one resolves to nothing, not a cloud client.
     from agent.auxiliary_local_runtime import bare_llamacpp_endpoint
@@ -6045,7 +6075,7 @@ def _get_cached_client(
                 cached_loop is not None and cached_loop is current_loop and not cached_loop.is_closed()
             )
             if loop_ok:
-                return cached_client, _compat_model(cached_client, model, cached_default)
+                return cached_client, (cached_default if route_owned_model else _compat_model(cached_client, model, cached_default))
             # Stale async entry — evict. Only a closed owner loop may be awaited here; a live
             # foreign loop stays force-neutered.
             _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
@@ -6068,7 +6098,7 @@ def _get_cached_client(
         # shares the runtime key, and a cached one is served to every later caller — the
         # next probe dies in _compat_model() on stub attribute access, so check_fns flip to
         # False and vision tools vanish for the process lifetime (#87654).
-        return client, model or default_model
+        return client, (default_model if route_owned_model else model or default_model)
     if client is not None:
         with _client_cache_lock:
             if cache_key not in _client_cache:
@@ -6082,7 +6112,7 @@ def _get_cached_client(
                 client, default_model, _ = _client_cache[cache_key]
                 # Race loser was never exposed to a caller — safe to close now.
                 _close_cached_client(built_client, close_async=async_mode)
-    return client, _compat_model(client, model, default_model)
+    return client, (default_model if route_owned_model else _compat_model(client, model, default_model))
 
 
 # MoA virtual provider: an *explicit* `provider: moa` override (either the caller-passed `provider` arg or
@@ -7427,11 +7457,12 @@ def _resolve_call_client(
             api_key=resolved_api_key or api_key, async_mode=async_mode, main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning("Vision provider %s unavailable, falling back to auto vision backends",
-                           resolved_provider)
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto", model=resolved_model, async_mode=async_mode,
-                main_runtime=main_runtime)
+            client, final_model, fb_label = _try_configured_fallback_for_unavailable_client(
+                task, resolved_provider)
+            if client is not None:
+                if async_mode:
+                    client, final_model = _to_async_client(client, final_model or "", is_vision=True)
+                effective_provider = fb_label or resolved_provider
         if client is not None:
             resolved_provider = effective_provider or resolved_provider
     else:
