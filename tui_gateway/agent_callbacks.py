@@ -560,6 +560,10 @@ def _rebuild_session_agent(sid: str, session: dict, **kwargs):
                            ("create_service_tier_override", "service_tier_override")):
             if kwarg not in kwargs and session.get(pin) is not None:
                 kwargs[kwarg] = session[pin]
+        if session.get("team_model_preset") is not None:
+            kwargs.setdefault("team_model_preset", session["team_model_preset"])
+        if session.get("provider_override"):
+            kwargs.setdefault("provider_override", session["provider_override"])
         agent = _make_agent(sid, session["session_key"], session_db=session_db, **kwargs)
     except BaseException:
         if opened and session_db is not None:
@@ -606,7 +610,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         # /new is a full conversation boundary: session-scoped runtime overrides (/model,
         # /reasoning, /fast) do NOT carry forward and the pins are cleared so a rebuild can't
         # resurrect them. Global process state is never touched (see _apply_model_switch).
-        for k in ("model_override", "create_reasoning_override", "create_service_tier_override", "one_turn_model_restore"):
+        for k in ("model_override", "provider_override", "create_reasoning_override", "create_service_tier_override", "one_turn_model_restore"):
             session.pop(k, None)
         new_agent = _rebuild_session_agent(
             sid, session, session_id=session["session_key"],

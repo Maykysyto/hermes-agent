@@ -485,6 +485,14 @@ def _workdir_row_model_config(session: dict) -> tuple[str, dict]:
                 model_config["provider"] = healed
         except Exception:
             logger.debug("custom provider identity recovery failed (db row)", exc_info=True)
+    if (snapshot := session.get("team_model_preset")) is not None:
+        model_config["team_model_preset"] = snapshot
+        if not override and not session.get("provider_override"):
+            from hermes_constants import parse_reasoning_effort
+            model_config.update(model=snapshot["model"], provider=snapshot["provider"],
+                                reasoning_config=parse_reasoning_effort(snapshot["reasoning_effort"]))
+    if session.get("provider_override"):
+        model_config["provider"] = session["provider_override"]
     if (reasoning := session.get("create_reasoning_override")) is not None:
         model_config["reasoning_config"] = reasoning
     if (service_tier := session.get("create_service_tier_override")) is not None:

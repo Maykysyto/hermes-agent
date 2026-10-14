@@ -28,6 +28,20 @@ def _single_query_clarify_callback(questions: list) -> dict:
         "judgment, or make the most reasonable assumption you can, and continue.")}
 
 
+def _persist_team_preset(cli, *, ensure=False) -> None:
+    """Store provenance and effective route using the existing non-secret DB seam."""
+    snapshot = getattr(cli, "_team_model_preset", None)
+    db = getattr(cli, "_session_db", None)
+    if snapshot is None or db is None:
+        return
+    if ensure:
+        cli.agent._ensure_db_session()
+    route = {"provider": cli.provider, "base_url": cli.base_url, "api_mode": cli.api_mode}
+    db.patch_session_model_config(cli.session_id, {
+        "team_model_preset": snapshot, "reasoning_config": cli.reasoning_config,
+        "gateway_runtime": route, **route})
+
+
 def _current_runtime(cli) -> dict:
     """Snapshot the CLI's resolved provider routing as an AIAgent runtime dict.
 
@@ -685,6 +699,7 @@ class CLIAgentSetupMixin:
             # When this code lived in cli.py a bare ``global _active_agent_ref`` worked; after the god-file
             # extraction into this mixin a ``global`` here would bind *this module's* namespace, leaving
             # ``cli._active_agent_ref`` None forever — so memory shutdown never ran on /exit (#49287).
+            _persist_team_preset(self, ensure=True)
             import cli as _cli
             _cli._active_agent_ref = self.agent
             # Seed the agent's once-per-lifecycle auto_load cache with the bytes the preload

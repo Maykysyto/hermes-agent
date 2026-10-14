@@ -67,21 +67,6 @@ def _new_runtime_ids(params: dict) -> tuple[str, str]:
     return uuid.uuid4().hex[:8], _resolve_session_source(_str_param(params, "source") or None)
 
 
-def _profile_build_scope(profile_home):
-    """Bind HERMES_HOME + secret + terminal scope for an agent build: the same composition a turn
-    binds (``_session_profile_runtime_scope``). Home alone leaves ``get_secret()`` on the LAUNCH
-    ``.env``; home + secrets alone leaves ``_make_agent``'s terminal probing on the launch process's
-    ambient ``TERMINAL_*`` (a ``terminal.backend: docker`` secondary built a ``local`` agent)."""
-    return _session_profile_runtime_scope({"profile_home": str(profile_home) if profile_home else None})
-
-
-def _make_agent_in_context(sid: str, key: str, **kwargs):
-    """``_make_agent`` with the session context bound for the build and cleared after."""
-    tokens = _set_session_context(key, cwd=kwargs.get("cwd_override"))
-    try:
-        return _make_agent(sid, key, session_id=key, **kwargs)
-    finally:
-        _clear_session_context(tokens)
 
 
 def _profile_session_db(profile_home):
@@ -401,6 +386,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     from .methods_session_model_guard import create_overrides
     try:
         session_model_override, create_reasoning_override, create_service_tier_override = create_overrides(params)
+        team_model_preset = _resolve_new_session_preset(params, profile_home)
     except ValueError as exc:
         return _err(rid, 4002, str(exc))
     composer_override_profile = None
@@ -421,7 +407,8 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
             "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
             "seeded": bool(history),  # gates _persist_branch_seed: only create-time history is unpersisted
             "cwd": session_cwd, "inflight_turn": None, "last_active": now,
-            "model_override": session_model_override,
+            "model_override": session_model_override, "team_model_preset": team_model_preset,
+            "provider_override": (_str_param(params, "provider") or None) if not session_model_override else None,
             "composer_override_profile": composer_override_profile,
             "create_reasoning_override": create_reasoning_override,
             "create_service_tier_override": create_service_tier_override,
@@ -638,16 +625,21 @@ class _Resume:
     def record(self, source: str, cwd: str, history: list, overrides: dict | None = None, **extra) -> dict:
         """``_deferred_session_record`` with this resume's common fields (lease claimed lazily on turn 1);
         ``overrides`` restores the stored model/provider/reasoning/tier so the deferred build matches eager."""
+        model_config = _parse_model_config((self.found or {}).get("model_config"), quiet=True)
+        if overrides is None and "team_model_preset" in model_config:
+            with _profile_build_scope(self.profile_home):
+                overrides = _stored_session_runtime_overrides(self.found)
         if overrides is not None:
             extra.update(model_override=overrides.get("model_override"), resume_runtime_overrides=overrides or None)
-            model_config = _parse_model_config((self.found or {}).get("model_config"), quiet=True)
             follows_profile = _row_follows_profile(self.found)
         else:
-            model_config, follows_profile = {}, False
+            follows_profile = False
         record = _deferred_session_record(
             self.target, cols=self.cols, cwd=cwd, history=history, lease=None, source=source,
             close_on_disconnect=_flag(self.params, "close_on_disconnect"),
             profile_home=self.profile_home, explicit_cwd=bool(self.profile_resume_cwd), **extra)
+        if (snapshot := _session_preset_snapshot(model_config)) is not None:
+            record["team_model_preset"] = snapshot
         if follows_profile:
             record.update(follow_profile_config=True, composer_override_profile=(
                 model_config.get("composer_override_profile") if overrides and overrides.get("model_override") else None))
@@ -1023,6 +1015,8 @@ def _resume_eager(ctx: _Resume) -> dict:
                 if stored_runtime_overrides.get("model_override") is not None:
                     session["model_override"] = stored_runtime_overrides["model_override"]
                 model_config = _parse_model_config(ctx.found.get("model_config"), quiet=True)
+                if (snapshot := _session_preset_snapshot(model_config)) is not None:
+                    session["team_model_preset"] = snapshot
                 if _row_follows_profile(ctx.found):
                     session["follow_profile_config"] = True
                     session["composer_override_profile"] = (

@@ -1024,26 +1024,6 @@ def _release_build_profile_scopes(scopes: "_TurnScopes | None") -> None:
         _release_profile_runtime_scope_tokens(scopes)
 
 
-def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
-    """_make_agent kwargs for a deferred (first-prompt) build. A lazy-resumed (watch) session carries the
-    stored conversation id so the upgrade continues it; a cold deferred resume restores the full persisted
-    runtime identity (like the eager resume's overrides splat) so the build can't drop the provider. No
-    stored runtime, or an unroutable provider → this session's picked model/effort/tier, else the default."""
-    kw = {"session_db": session_db, "context_cwd_is_launch_artifact": _context_cwd_is_launch_artifact(current),
-          "platform_override": _session_source(current), "cwd_override": _session_cwd(current)}
-    if resume_sid := current.get("resume_session_id"):
-        kw["session_id"] = resume_sid
-    resume_overrides = current.get("resume_runtime_overrides")
-    if isinstance(resume_overrides, dict) and resume_overrides and _overrides_have_routable_provider(resume_overrides):
-        kw.update(resume_overrides)
-    else:
-        if override := current.get("model_override"):
-            kw["model_override"] = override
-        kw.update({k: v for k, v in (("reasoning_config_override", current.get("create_reasoning_override")),
-                                     ("service_tier_override", current.get("create_service_tier_override")))
-                   if v is not None})
-    return kw
-
 
 def _wire_session_agent(sid: str, key: str, agent) -> bool:
     """Post-build wiring; returns whether the approval notify got registered. Approval prompts route to the
@@ -1669,9 +1649,12 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         str(composer_profile.get("model") or "").strip(),
         str(composer_profile.get("provider") or "").strip(),
     ) == _config_model_target()
-    if room_plumbing or (_row_follows_profile(row) and not composer_profile_matches):
+    snapshot = _session_preset_snapshot(model_config)
+    if snapshot is None and (room_plumbing or (_row_follows_profile(row) and not composer_profile_matches)):
         return {}
     overrides: dict = {}
+    if snapshot is not None:
+        overrides["team_model_preset"] = snapshot
     model = str(row.get("model") or model_config.get("model") or "").strip()
     # Canonical route reader shared with CLI --resume: nested ``gateway_runtime`` (the route the messaging
     # gateway last ran) before the TUI's top-level keys, then a routable ``billing_provider`` (#125942).
@@ -1753,6 +1736,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
     try:
         row = db.get_session(session_key) or {}
         model_config = _runtime_model_config(agent, _parse_model_config(row.get("model_config")))
+        if session.get("team_model_preset") is not None:
+            model_config["team_model_preset"] = session["team_model_preset"]
         if isinstance(composer_profile := session.get("composer_override_profile"), dict):
             model_config["composer_override_profile"] = composer_profile
         elif "composer_override_profile" in session:
@@ -2653,7 +2638,7 @@ def _make_agent(
     model_override: dict | str | None = None, provider_override: str | None = None,
     reasoning_config_override: dict | None = None, service_tier_override: str | None = None,
     platform_override: str | None = None, context_cwd_is_launch_artifact: bool | None = None,
-    cwd_override: str | None = None, auth_user_id: str | None = None):
+    cwd_override: str | None = None, auth_user_id: str | None = None, team_model_preset: dict | None = None):
     # AC-4 test seam: dead unless armed by the isolated certify harness.
     from tui_gateway.synthetic_turn import maybe_build_synthetic_agent
     synthetic = maybe_build_synthetic_agent(session_id or key, model_override)
@@ -2670,7 +2655,10 @@ def _make_agent(
     from agent.shell_hooks import register_from_config
     register_from_config(cfg)
     system_prompt = _startup_system_prompt(cfg, session_id or key)
+    model_override, provider_override, reasoning_config_override, preset_defaults = _preset_agent_defaults(
+        team_model_preset, model_override, provider_override, reasoning_config_override)
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
+    reasoning_config_override = _preset_agent_reasoning(preset_defaults, model, runtime, reasoning_config_override)
     fallback_notice = runtime.pop("_fallback_notice", None)
     _pr = _load_provider_routing()
     platform = _resolve_agent_platform(platform_override)
@@ -3656,7 +3644,7 @@ from . import (
     agent_callbacks as _agent_callbacks, session_history as _session_history,
     prompt_attachments as _prompt_attachments, session_notifications as _session_notifications,
     tool_progress as _tool_progress, change_watcher as _change_watcher,
-    session_compression as _session_compression, model_switch as _model_switch,
+    session_compression as _session_compression, model_switch as _model_switch, team_model_presets as _team_model_presets,
     compute_host_bridge as _compute_host_bridge, session_workdir as _session_workdir,
     session_lifecycle as _session_lifecycle, session_reaper as _session_reaper,
     session_transports as _session_transports, prompt_turn as _prompt_turn, billing_view as _billing_view,
@@ -3674,7 +3662,7 @@ from . import (
     methods_shared_metrics as _methods_shared_metrics, methods_plugin_catalog as _methods_plugin_catalog)
 
 for _m in (
-    _session_transports, _session_reaper, _session_lifecycle, _session_workdir, _compute_host_bridge, _model_switch,
+    _session_transports, _session_reaper, _session_lifecycle, _session_workdir, _compute_host_bridge, _model_switch, _team_model_presets,
     _session_compression, _change_watcher, _tool_progress, _session_notifications,
     _prompt_attachments, _session_history, _agent_callbacks, _session_auto_continue, _plugin_inject, _rpc_dispatch,
     _methods_complete_helpers, _methods_slash, _methods_voice, _methods_browser,

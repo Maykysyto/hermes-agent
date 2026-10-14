@@ -147,13 +147,15 @@ def _session_default_route(session: dict) -> tuple[str, str]:
     first state.db row carried the launch profile's model id. On the Nous free tier the agent build pins
     ``nous/welcome`` (``pin_model_for_route``), so the configured default (often the silent default,
     with no provider) is not what the session runs; report the pinned route instead."""
+    if snapshot := session.get("team_model_preset"):
+        return snapshot["model"], snapshot["provider"]
     from hermes_cli.anon_auth import GUEST_MODEL, free_tier_route
     with _session_profile_runtime_scope({"profile_home": session.get("profile_home") or None},
                                         hydrate_secrets=False):
-        if not _resolve_startup_runtime()[1] and free_tier_route():
+        if not session.get("provider_override") and not _resolve_startup_runtime()[1] and free_tier_route():
             return GUEST_MODEL, "nous"
         # Off the free tier, the model id alone: the provider is resolved when the agent is built.
-        return _resolve_model(), ""
+        return _resolve_model(), session.get("provider_override") or ""
 
 
 def _lazy_info_route(session: dict, override: dict) -> dict:
@@ -451,7 +453,7 @@ def _sync_agent_model_with_config(sid: str, session: dict) -> None:
     """Adopt a config.yaml model change at turn start (like gateways do per message). Sessions
     pinned with /model keep their choice; a failed switch keeps the current model."""
     agent = session.get("agent")
-    if agent is None:
+    if agent is None or session.get("team_model_preset") is not None:
         return
     target = _config_model_target()
     if not target[0]:

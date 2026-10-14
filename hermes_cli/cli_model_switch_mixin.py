@@ -25,7 +25,7 @@ from hermes_cli.cli_agent_setup_mixin import _retire_agent
 # new model's effort behind with the old route.
 _RUNTIME_FIELDS = (
     "model", "provider", "requested_provider", "_explicit_api_key", "_explicit_base_url",
-    "api_key", "base_url", "api_mode", "reasoning_config")
+    "api_key", "base_url", "api_mode", "reasoning_config", "_team_preset_route_active")
 
 
 def _runtime_fields(cli) -> dict:
@@ -43,6 +43,35 @@ def _resolve_cli_reasoning(cli) -> None:
     from hermes_constants import resolve_reasoning_config
     # getattr: tests drive /new unbound on a SimpleNamespace without ``model`` (blank -> config default).
     cli.reasoning_config = resolve_reasoning_config(CLI_CONFIG, getattr(cli, "model", None) or "")
+    preset = getattr(cli, "_team_model_preset", None)
+    if preset and getattr(cli, "_team_preset_route_active", False) and cli.model == preset["model"] and getattr(cli, "provider", None) == preset["provider"]:
+        from cli import _parse_reasoning_config
+        cli.reasoning_config = _parse_reasoning_config(preset["reasoning_effort"])
+    explicit = getattr(cli, "_explicit_reasoning_config", None)
+    if explicit is not None:
+        cli.reasoning_config = explicit
+
+
+def _restore_team_preset_state(cli, session_meta):
+    """Recover the saved default without reading the current catalog."""
+    from hermes_state_sessions import _parse_model_config
+    from hermes_cli.team_model_presets import validate_preset_snapshot
+    stored_config = _parse_model_config(session_meta.get("model_config"))
+    snapshot = stored_config.get("team_model_preset")
+    cli._team_model_preset = validate_preset_snapshot(snapshot) if snapshot is not None else None
+    cli._team_preset_route_active = bool(cli._team_model_preset)
+    return stored_config
+
+
+def _restore_team_preset_reasoning(cli, stored_config):
+    """Restore the effective effort, including an explicit effort saved with the session."""
+    if not cli._team_model_preset:
+        return
+    _resolve_cli_reasoning(cli)
+    if getattr(cli, "_explicit_reasoning_config", None) is None:
+        cli.reasoning_config = stored_config.get("reasoning_config") or cli.reasoning_config
+    if cli.agent is not None:
+        cli.agent.reasoning_config = cli.reasoning_config
 
 
 def stored_session_route(session_meta, *, current_model, current_provider):
@@ -441,7 +470,10 @@ class CLIModelSwitchMixin:
             "api_mode": result.api_mode or None}
         try:
             db.update_session_model(sid, result.new_model)
-            db.patch_session_model_config(sid, {"gateway_runtime": route, **route})
+            patch = {"gateway_runtime": route, **route}
+            if getattr(self, "_team_model_preset", None) is not None:
+                patch["reasoning_config"] = self.reasoning_config
+            db.patch_session_model_config(sid, patch)
         except Exception:
             logger.debug("Failed to persist model switch to session DB", exc_info=True)
 
@@ -456,8 +488,10 @@ class CLIModelSwitchMixin:
         from cli import logger
         if not (session_meta or {}).get("model") or getattr(self, "_explicit_model_override", False):
             return
+        stored_config = _restore_team_preset_state(self, session_meta)
         route = stored_session_route(session_meta, current_model=self.model, current_provider=self.provider)
         if route is None:
+            _restore_team_preset_reasoning(self, stored_config)
             return
         stored_model, stored_provider, stored_base_url, stored_api_mode, provider_changed = route
         from hermes_cli.local_runtime.endpoint import LLAMACPP_ALIASES
@@ -515,6 +549,7 @@ class CLIModelSwitchMixin:
                     "%s failed; keeping ambient credentials",
                     stored_provider, exc_info=True)
         _resolve_cli_reasoning(self)
+        _restore_team_preset_reasoning(self, stored_config)
         # Mid-chat /resume swaps the live agent; on startup --resume _init_agent picks up
         # self.model / self.provider / self.reasoning_config.
         if self.agent is not None:
@@ -522,6 +557,7 @@ class CLIModelSwitchMixin:
                 self.agent.switch_model(
                     new_model=self.model, new_provider=self.provider, api_key=self.api_key or "",
                     base_url=self.base_url or "", api_mode=self.api_mode or "")
+                _restore_team_preset_reasoning(self, stored_config)
             except Exception:
                 logger.debug("In-place agent model swap on resume failed", exc_info=True)
         msg = t("cli.model.restored_from_session", model=stored_model)
@@ -675,6 +711,7 @@ class CLIModelSwitchMixin:
         """
         from cli import _cprint
         _cli_snapshot = _runtime_fields(self)
+        self._team_preset_route_active = False
         self.model = result.new_model
         self.provider = result.target_provider
         self.requested_provider = result.target_provider

@@ -21,6 +21,12 @@ from utils import base_url_host_matches, base_url_hostname, is_truthy_value
 logger = logging.getLogger("cli")
 
 
+def _model_config_for_preset(config, preset):
+    if preset is None:
+        return config["model"]
+    return {"default": preset["model"], "provider": preset["provider"]}
+
+
 class CLIInitMixin:
     """HermesCLI constructor phases: display options, model/provider routing, turn limits, toolsets, checkpoints, prompt/reasoning, runtime state, session store and UI state."""
 
@@ -97,18 +103,22 @@ class CLIInitMixin:
 
     def _init_model_routing(self, model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, checkpoints, pass_session_id, ignore_rules):
         """Resolve model/provider/base_url, turn limits, toolsets, checkpoints, prompt/personality, reasoning + routing config."""
+        self._team_preset_startup_args = (model, provider, api_key, base_url)
+        self._team_model_preset = None
+        self._team_preset_route_active = False
+        self._explicit_provider_override = bool(provider)
         self._init_model_and_provider(model, provider, api_key, base_url)
         self._init_turn_limits(max_turns, run_budget)
         self._init_toolsets(toolsets)
         self._init_checkpoints_and_rules(checkpoints, pass_session_id, ignore_rules)
         self._init_prompt_and_reasoning(reasoning)
 
-    def _init_model_and_provider(self, model, provider, api_key, base_url):
+    def _init_model_and_provider(self, model, provider, api_key, base_url, *, preset=None):
         """Priority: CLI args > env vars > config file."""
         from cli import CLI_CONFIG, _normalize_moa_model, _split_model_config_default
         # LLM_MODEL/OPENAI_MODEL env vars are deliberately NOT checked (multi-agent setups
         # would stomp each other through the environment).
-        _model_config = CLI_CONFIG["model"]
+        _model_config = _model_config_for_preset(CLI_CONFIG, preset)
         # A dict-valued default carries its own provider, which must feed requested_provider
         # instead of being replaced by the merged model.provider (typically "auto").
         _config_model, _nested_provider = _split_model_config_default(
@@ -310,6 +320,7 @@ class CLIInitMixin:
         self._prompt_duration: float = 0.0
         self._last_turn_finished_at: Optional[float] = None
         self._init_session_store()
+        self._init_team_preset_route(resume)
         self._pending_title: Optional[str] = None
         self._resumed = bool(resume)
         self.session_id = resume or new_session_id(self.session_start)
@@ -318,6 +329,20 @@ class CLIInitMixin:
         self._history_file = _hermes_home / ".hermes_history"
         self._last_invalidate: float | None = None  # throttles UI repaints (None = never; monotonic epoch is arbitrary)
         self._init_ui_state()
+
+    def _init_team_preset_route(self, resume):
+        """Resume never consults the live catalog; new runs capture a default once."""
+        from cli import CLI_CONFIG
+        from hermes_cli.team_model_presets import resolve_profile_preset
+        from hermes_cli.cli_model_switch_mixin import _resolve_cli_reasoning
+        model, provider, api_key, base_url = self._team_preset_startup_args
+        if resume or model or provider:
+            return
+        self._team_model_preset = resolve_profile_preset(CLI_CONFIG)
+        if self._team_model_preset is not None:
+            self._team_preset_route_active = True
+            self._init_model_and_provider(None, None, api_key, base_url, preset=self._team_model_preset)
+            _resolve_cli_reasoning(self)
 
     def _init_session_store(self):
         """Open the session store early (so /title works before the first message) + opportunistic maintenance."""

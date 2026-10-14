@@ -186,7 +186,9 @@ class GatewayConfigLoadersMixin:
             _r_state = self._peek_session_state(resolved_session_key)
             if _r_state is not None and _r_state.conversation.reasoning_override is not None:
                 return _r_state.conversation.reasoning_override
-        return self._load_reasoning_config(model)
+        from gateway.run_model_presets import preset_reasoning_config
+        preset_config = preset_reasoning_config(self, resolved_session_key, source, model)
+        return preset_config if preset_config is not None else self._load_reasoning_config(model)
 
     def _set_session_reasoning_override(self, session_key: str, reasoning_config: Optional[dict]) -> None:
         """Set or clear the session-scoped reasoning override."""

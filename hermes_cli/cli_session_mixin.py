@@ -59,12 +59,67 @@ def _dim_notice(cli, msg: str, quiet: bool) -> None:
         cli._console_print(f"[dim]{_escape(msg)}[/dim]")
 
 
-def _reset_model_to_config_default(cli, silent: bool) -> None:
+_UNRESOLVED_PRESET = object()
+
+
+def _prepare_preset_default(cli, preset):
+    """Resolve credentials before /new changes the conversation or its saved state."""
+    from hermes_cli.team_model_presets import PresetRoutingError
+    from hermes_cli.model_switch import switch_model
+    if preset is None or _config_route_matches(cli, preset["model"], preset["provider"]):
+        return None
+    try:
+        result = switch_model(
+            raw_input=preset["model"], explicit_provider=preset["provider"], is_global=False,
+            current_provider=cli.provider or "", current_model=cli.model or "",
+            current_base_url=cli.base_url or "", current_api_key=cli.api_key or "")
+        if not result.success:
+            raise PresetRoutingError(f"Cannot apply team preset: {result.error}")
+        return result
+    except Exception as exc:
+        raise PresetRoutingError(f"Cannot apply team preset: {exc}") from exc
+
+
+def _reset_preset_default(cli, preset, prepared):
+    """Publish the selected snapshot only after the corresponding route is applied."""
+    from hermes_cli.team_model_presets import PresetRoutingError
+    result = _prepare_preset_default(cli, preset) if prepared is _UNRESOLVED_PRESET else prepared
+    try:
+        if result is not None:
+            if cli.agent:
+                cli.agent.switch_model(
+                    new_model=result.new_model, new_provider=result.target_provider,
+                    api_key=result.api_key, base_url=result.base_url, api_mode=result.api_mode,
+                    capabilities=getattr(result, "runtime_capabilities", None))
+            cli.model = result.new_model
+            cli.provider = cli.requested_provider = result.target_provider
+            cli.api_key = cli._explicit_api_key = result.api_key
+            cli.base_url = cli._explicit_base_url = result.base_url
+            cli.api_mode = result.api_mode
+    except Exception as exc:
+        raise PresetRoutingError(f"Cannot apply team preset: {exc}") from exc
+    cli._team_model_preset = preset
+    cli._team_preset_route_active = True
+
+
+def _config_route_matches(cli, model, provider):
+    return (model == getattr(cli, "model", None)
+            and (not provider or provider == getattr(cli, "provider", None)))
+
+
+def _reset_model_to_config_default(cli, silent: bool, *, preset=_UNRESOLVED_PRESET, prepared=_UNRESOLVED_PRESET) -> None:
     """/new is a full boundary: re-derive model/provider from config.yaml so a
     session-only ``/model --session`` switch never leaks into the next session.
-    Best-effort — an unreachable default must never block /new. Module-level helper (like
+    Native defaults are best-effort; selected preset failures are visible. Module-level helper (like
     ``_apply_new_session_title``): tests drive ``new_session`` unbound on a SimpleNamespace."""
     from cli import CLI_CONFIG, _cprint, _split_model_config_default, logger
+    from hermes_cli.team_model_presets import resolve_profile_preset
+    preset = resolve_profile_preset(CLI_CONFIG) if preset is _UNRESOLVED_PRESET else preset
+    if preset is not None:
+        _reset_preset_default(cli, preset, prepared)
+        return
+    cli._team_model_preset = None
+    cli._team_preset_route_active = False
     _model_config = CLI_CONFIG.get("model", {})
     if isinstance(_model_config, dict):
         _raw_default = _model_config.get("default") or _model_config.get("model") or ""
@@ -72,7 +127,7 @@ def _reset_model_to_config_default(cli, silent: bool) -> None:
     else:
         _raw_default, _config_provider = (_model_config or ""), ""
     _config_model, _ = _split_model_config_default(_raw_default)
-    if not _config_model or _config_model == getattr(cli, "model", None):
+    if not _config_model or _config_route_matches(cli, _config_model, _config_provider):
         return
     try:
         from hermes_cli.model_switch import switch_model as _switch_model
@@ -483,6 +538,9 @@ class CLISessionMixin:
             CLI_CONFIG, _parse_service_tier_config,
             _sync_process_session_id, datetime)
         from hermes_cli.cli_model_switch_mixin import _resolve_cli_reasoning
+        from hermes_cli.team_model_presets import resolve_profile_preset
+        new_preset = resolve_profile_preset(CLI_CONFIG)
+        prepared_preset = _prepare_preset_default(self, new_preset)
         old_session_id = self.session_id
         _boundary_snapshot = None
         if self.agent:
@@ -519,12 +577,14 @@ class CLISessionMixin:
         self._resumed = False
         # An explicit -m/--model was for the previous session only.
         self._explicit_model_override = False
+        self._explicit_provider_override = False
+        self._explicit_reasoning_config = None
         # Session-scoped overrides (/model --session, /fast, one-turn restores) don't carry over.
         # Re-derive model/provider and service tier from config.yaml so a session-only switch never leaks
         # into the next session (#48055, #23131).
         self._pending_one_turn_model_restore = None
         self.service_tier = _parse_service_tier_config(CLI_CONFIG["agent"].get("service_tier", ""))
-        _reset_model_to_config_default(self, silent)
+        _reset_model_to_config_default(self, silent, preset=new_preset, prepared=prepared_preset)
         # After the model reset: the effort belongs to the model the fresh session lands on (a /reasoning
         # session override is dropped, the default model's per-model override is kept).
         _resolve_cli_reasoning(self)
@@ -555,6 +615,8 @@ class CLISessionMixin:
                             "max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
                         })
                     self.agent._session_db_created = True
+                    from hermes_cli.cli_agent_setup_mixin import _persist_team_preset
+                    _persist_team_preset(self)
                 if title:
                     title = _apply_new_session_title(self, title)
             # Tell memory providers the session_id rotated (reset=True flushes per-session
