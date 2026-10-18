@@ -22,6 +22,18 @@ logger = logging.getLogger("plugins.platforms.discord.adapter")
 _DISCORD_DEFAULT_UPLOAD_LIMIT_BYTES = 20 * 1024 * 1024
 
 
+def _discord_module():
+    """discord.py as importable now, not the ``discord`` global of ``plugins.platforms.discord.adapter``.
+
+    That import path can be a second load of the adapter module, distinct from the one the platform
+    registry loaded; when it ran before the lazy install of discord.py its ``discord`` stayed ``None``
+    and every attachment failed with ``'NoneType' object has no attribute 'File'`` (Mayky, A6).
+    """
+    import discord
+
+    return discord
+
+
 class DiscordMediaMixin:
     @staticmethod
     def _discord_upload_limit_bytes(channel: Any) -> int:
@@ -87,7 +99,8 @@ class DiscordMediaMixin:
 
         See #66797.
         """
-        from plugins.platforms.discord.adapter import _prompt_target_id, discord
+        from plugins.platforms.discord.adapter import _prompt_target_id
+        discord = _discord_module()
 
         if not self._client:
             return SendResult(success=False, error="Not connected")
@@ -280,7 +293,8 @@ class DiscordMediaMixin:
         reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None, **kwargs,
     ) -> SendResult:
         """Send audio as a Discord file attachment."""
-        from plugins.platforms.discord.adapter import _prompt_target_id, discord
+        from plugins.platforms.discord.adapter import _prompt_target_id
+        discord = _discord_module()
 
         try:
             import io
@@ -374,7 +388,8 @@ class DiscordMediaMixin:
     ) -> SendResult:
         """Download ``url`` and post it as a native attachment (Discord renders those inline).
         ``fallback(metadata)`` is the base-adapter URL send (``error_metadata`` after download failure)."""
-        from plugins.platforms.discord.adapter import _prompt_target_id, _read_url_image_with_redirect_guard, discord, is_safe_url
+        from plugins.platforms.discord.adapter import _prompt_target_id, _read_url_image_with_redirect_guard, is_safe_url
+        discord = _discord_module()
 
         if not self._client:
             return SendResult(success=False, error="Not connected")
