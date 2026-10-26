@@ -2117,6 +2117,13 @@ def _dispatch_lane_task(
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
+        if _review_drops_card_model(conn, claimed):
+            # The card's -m/--provider pins the IMPLEMENTER's backend. A reviewer
+            # handed the same card (request_review(reviewer=...)) runs its own
+            # profile's model, or the review is the producer grading itself.
+            # In memory only: the row keeps the override for the next
+            # implementation round after request_changes.
+            claimed.model_override = claimed.provider_override = None
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
@@ -2144,6 +2151,18 @@ def _dispatch_lane_task(
         ):
             result.auto_blocked.append(claimed.id)
         return False
+
+
+def _review_drops_card_model(conn: sqlite3.Connection, task: Task) -> bool:
+    """True when a review-lane run belongs to a profile other than the one that
+    implemented the card (``implementer`` of the latest ``review_requested``).
+    A card created for the reviewer itself, or reviewed by its implementer, keeps
+    its pinned model."""
+    if not task.model_override:
+        return False
+    event = _kb._latest_event(conn, task.id, "review_requested")
+    implementer = _kb._json_dict(_kb._row_get(event, "payload")).get("implementer") if event else None
+    return isinstance(implementer, str) and bool(implementer.strip()) and implementer != task.assignee
 
 
 def _apply_default_assignee(
