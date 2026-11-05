@@ -42,7 +42,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/save` | Save the current conversation |
 | `/prompt` (alias: `/compose`) | Compose your next prompt in `$EDITOR` (markdown) instead of the inline input — useful for long, multi-line, or carefully-formatted prompts. |
 | `/retry` | Retry the last message (resend to agent) |
-| `/undo` | Remove the last user/assistant exchange |
+| `/undo` | Remove the last user/assistant exchange; with checkpoints on (default) also reverts the files that turn wrote |
 | `/title` | Set a title for the current session (usage: /title My Session Name) |
 | `/compress [here [N] \| focus topic]` | Manually compress conversation context (flush memories + summarize). `/compress here [N]` summarizes everything except the most recent N exchanges (default 2), kept verbatim — pick your own compression boundary. A focus topic narrows what a full summary preserves. |
 | `/rollback` | List or restore filesystem checkpoints (usage: /rollback [number]) |
@@ -254,7 +254,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/personality [name]` | Set a personality overlay for the session. `/personality none` (or `default` / `neutral`) clears it. |
 | `/fast [normal\|fast\|auto\|cold\|status]` | Fast mode — OpenAI Priority Processing / Anthropic Fast Mode. `auto`/`cold` open a bounded fast window per turn / per session. |
 | `/retry` | Retry the last message. |
-| `/undo` | Remove the last exchange. |
+| `/undo` | Remove the last exchange and revert the files it wrote (checkpoints on). |
 | `/sethome` (alias: `/set-home`) | Mark the current chat as the platform home channel for deliveries. |
 | `/compress [here [N] \| focus topic]` | Manually compress conversation context. `/compress here [N]` keeps the most recent N exchanges (default 2) verbatim and summarizes the rest. A focus topic narrows what a full summary preserves. |
 | `/topic [off\|help\|session-id]` | **Telegram DM only.** Manage user-managed multi-session topic mode. `/topic` enables it or shows status; `/topic off` disables it and clears bindings; `/topic help` shows usage; `/topic <session-id>` inside a topic restores a previous session. See [Multi-session DM mode](../user-guide/messaging/telegram.md#multi-session-dm-mode-topic). |
