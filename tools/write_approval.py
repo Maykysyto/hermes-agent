@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
+from tools import mayky_improvement_store
 
 logger = logging.getLogger(__name__)
 
@@ -74,19 +75,14 @@ def _pending_files(subsystem: str) -> list:
 def stage_write(subsystem: str, payload: dict[str, Any], *, summary: str, origin: str) -> dict[str, Any]:
     """Persist a pending write and return its record (``id`` + metadata). ``payload`` is the exact
     kwargs to replay the write on approval; ``origin`` is ``foreground`` or ``background_review``.
-    Best-effort: on disk failure it logs and still returns a record — the write is lost, which is
-    the safe failure for an approval gate (nothing silently committed)."""
+    Originals are archived durably before publication; disk/archive errors propagate."""
     pid = uuid.uuid4().hex[:8]
     record = {
         "id": pid, "subsystem": subsystem, "action": payload.get("action", ""),
         "summary": (summary or "").strip(), "origin": origin or "foreground",
         "created_at": time.time(), "payload": payload,
     }
-    try:
-        atomic_json_write(_pending_path(subsystem, pid), record)
-    except Exception as e:  # pragma: no cover - disk failure path
-        logger.error("Failed to stage pending %s write: %s", subsystem, e, exc_info=True)
-    return record
+    return mayky_improvement_store.stage_record(get_hermes_home(), subsystem, record)
 
 
 def list_pending(subsystem: str) -> list[dict[str, Any]]:
@@ -120,7 +116,7 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
     """Delete a pending record. Returns True if it existed."""
     try:
         path = _pending_path(subsystem, pending_id)
-        if path.exists():
+        if mayky_improvement_store.archive_existing(get_hermes_home(), subsystem, pending_id):
             path.unlink()
             return True
     except Exception as e:  # pragma: no cover

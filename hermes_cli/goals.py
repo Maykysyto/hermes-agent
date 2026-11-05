@@ -37,6 +37,8 @@ DEFAULT_JUDGE_TIMEOUT = 30.0
 DEFAULT_JUDGE_MAX_TOKENS = 4096
 # Cap how much of the last response we send to the judge.
 _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
+# Separate cap for runtime hand-off framing (judge_goal ``handoff_note``); never shares the goal's 2000.
+_JUDGE_HANDOFF_NOTE_CHARS = 1000
 # Consecutive judge *parse* failures (empty / non-JSON) before the loop auto-pauses and points at
 # the goal_judge config. API/transport errors do NOT count — those are tracked separately below.
 # Guards against small models that cannot follow the strict JSON contract burning the whole budget.
@@ -900,12 +902,18 @@ def judge_goal(
     background_processes: Optional[list[dict[str, Any]]] = None,
     contract: Optional[GoalContract] = None,
     active_delegations: int = 0,
+    handoff_note: str = "",
 ) -> tuple[str, str, bool, Optional[dict[str, Any]], bool]:
     """Ask the auxiliary model whether the goal is satisfied.
 
     Returns ``(verdict, reason, parse_failed, wait_directive, transport_failed)``; verdict is done /
     blocked / continue / wait / skipped. ``parse_failed`` means unusable output; transport errors
     set ``transport_failed`` instead and fail-open to ``continue``.
+
+    ``handoff_note`` is fixed runtime framing for a specific lifecycle transition (never agent
+    text). It is rendered as its own block before the otherwise unchanged prompt, with its own
+    budget, so the goal keeps its full 2000-char window: framing must never push acceptance
+    criteria out of what the judge sees. Empty (the default) leaves the prompt byte-identical.
     """
     if not goal.strip():
         return "skipped", "empty goal", False, None, False
@@ -941,6 +949,9 @@ def judge_goal(
         prompt = JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE.format(subgoals_block=_truncate(subgoals_block, 2000), **common)
     else:
         prompt = JUDGE_USER_PROMPT_TEMPLATE.format(**common)
+    if handoff_note and handoff_note.strip():
+        # Own block ahead of the unchanged prompt: the Goal section and its 2000 budget are untouched.
+        prompt = f"{_truncate(handoff_note.strip(), _JUDGE_HANDOFF_NOTE_CHARS)}\n\n{prompt}"
 
     try:
         raw = _call_goal_judge_llm(call_llm, JUDGE_SYSTEM_PROMPT, prompt, timeout)

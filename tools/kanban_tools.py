@@ -483,6 +483,35 @@ _GOAL_GATE_MESSAGES = {
             "matching the card before requesting review.")}}
 
 
+# Fixed runtime framing for the review hand-off gate (never agent-supplied). Without it the judge
+# reads a card that ends "...then kanban_request_review(reviewer=...) for independent review" and
+# rejects the hand-off because the review request / reviewer verdict is "not yet evidenced" — a
+# precondition only this very transition can satisfy (MYT-248 deadlock). Passed as judge_goal's
+# ``handoff_note`` (own budget), never concatenated into the goal: the goal keeps its full 2000-char
+# window, so no acceptance criterion the judge saw before is pushed out by this framing.
+_REVIEW_HANDOFF_GOAL_NOTE = (
+    "[Runtime note, not written by the agent: the response below is the summary attached to the "
+    "kanban_request_review call being judged. That call IS the hand-off to independent review. "
+    "Judge only whether the producer-side deliverables and evidence are ready for a reviewer. Do "
+    "not require the review request itself, the reviewer's verdict, or any step that by definition "
+    "happens after this hand-off; every other criterion in the goal still applies.]")
+
+
+def _judge_handoff(goal: str, evidence: str, handoff_note: str):
+    """judge_goal with the hand-off note. A judge without ``handoff_note`` support (patch applied
+    without hermes_cli/goals.py, or a wrapper forwarding to the old signature) raises TypeError at
+    call time, which the gate's broad except would turn into fail-OPEN; instead the same judge is
+    asked again without the note, exactly as before this patch (fails closed on a real verdict)."""
+    if handoff_note:
+        try:
+            return judge_goal(goal=goal, last_response=evidence, handoff_note=handoff_note)
+        except TypeError as exc:
+            if "handoff_note" not in str(exc):
+                raise
+            logger.warning("goal judge lacks handoff_note support (%s); judging review hand-off without it", exc)
+    return judge_goal(goal=goal, last_response=evidence)
+
+
 def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
     """Goal-mode pre-handoff judge gate: a worker must not complete / request
     review before acceptance criteria are met. ``blocked`` gets its own
@@ -490,14 +519,15 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
     A broken judge fails open (logged) so it cannot permanently wedge work."""
     if not task or not task.goal_mode or not _goal_judge_available():
         return
+    note = _REVIEW_HANDOFF_GOAL_NOTE if tool_name == "kanban_request_review" else ""
     try:
         # Headless gate runs outside any agent turn: bind the per-task relay-affinity scope
         # (mirrors kanban_specify) so the relay does not reject the judge call (#113669).
         from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{tid}")
         try:
-            verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip())
+            verdict, reason, _, _, transport_failed = _judge_handoff(
+                f"{task.title}\n\n{task.body or ''}".strip(), evidence.strip(), note)
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)
