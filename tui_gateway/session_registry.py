@@ -95,27 +95,6 @@ def _release_build_profile_scopes(scopes: _TurnScopes | None) -> None:
         _release_profile_runtime_scope_tokens(scopes)
 
 
-def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
-    """_make_agent kwargs for a deferred (first-prompt) build. A lazy-resumed (watch) session carries the
-    stored conversation id so the upgrade continues it; a cold deferred resume restores the full persisted
-    runtime identity (like the eager resume's overrides splat) so the build can't drop the provider. No
-    stored runtime, or an unroutable provider → this session's picked model/effort/tier, else the default."""
-    kw = {"session_db": session_db, "context_cwd_is_launch_artifact": _context_cwd_is_launch_artifact(current),
-          "platform_override": _session_source(current), "cwd_override": _session_cwd(current)}
-    if resume_sid := current.get("resume_session_id"):
-        kw["session_id"] = resume_sid
-    resume_overrides = current.get("resume_runtime_overrides")
-    if isinstance(resume_overrides, dict) and resume_overrides and _overrides_have_routable_provider(resume_overrides):
-        kw.update(resume_overrides)
-    else:
-        if override := current.get("model_override"):
-            kw["model_override"] = override
-        kw.update({k: v for k, v in (("reasoning_config_override", current.get("create_reasoning_override")),
-                                     ("service_tier_override", current.get("create_service_tier_override")))
-                   if v is not None})
-    return kw
-
-
 def _wire_session_agent(sid: str, key: str, agent) -> bool:
     """Post-build wiring; returns whether the approval notify got registered. Approval prompts route to the
     client; the self-improvement "💾 …" summary is emitted as review.summary (no print surface), honoring

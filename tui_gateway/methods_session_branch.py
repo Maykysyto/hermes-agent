@@ -25,9 +25,10 @@ def _visible_branch_history(messages) -> list:
             and _coerce_message_text(message.get("content")).strip()]
 
 
-def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list, source: str):
+def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list, source: str, runtime_defaults=None):
     """Build + register the branched agent in the parent's profile; the DEDICATED db handle is ours until
     ``_transfer_db_to_agent`` (released here on failure)."""
+    runtime_defaults = _branch_model_defaults(session) if runtime_defaults is None else runtime_defaults
     parent_home = session.get("profile_home")
     parent_user_id = _session_auth_user_id(session)
     branch_db, branch_owns_db = _profile_session_db(parent_home) if parent_home else (None, False)
@@ -36,13 +37,17 @@ def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list
             agent = _make_agent_in_context(new_sid, new_key, session_db=branch_db, platform_override=source,
                                            cwd_override=_session_cwd(session),
                                            context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session),
-                                           auth_user_id=parent_user_id)
+                                           auth_user_id=parent_user_id, **runtime_defaults)
             _init_session(new_sid, new_key, agent, list(history), cols=session.get("cols", 80),
                           cwd=_session_cwd(session), session_db=branch_db, source=source, profile_home=parent_home,
                           explicit_cwd=bool(session.get("explicit_cwd")))
             _transfer_db_to_agent(agent, branch_db)
             branch_owns_db = False
         if new_sid in _sessions:
+            _sessions[new_sid].update(team_model_preset=runtime_defaults.get("team_model_preset"),
+                                      model_override=runtime_defaults.get("model_override"),
+                                      provider_override=runtime_defaults.get("provider_override"))
+            _persist_live_session_runtime(_sessions[new_sid])
             _sessions[new_sid]["active_session_lease"] = None  # claimed lazily on the first turn
             _sessions[new_sid]["auth_user_id"] = parent_user_id
             # The parent's STORED key: the idempotent-hit reply for a retried
@@ -109,6 +114,7 @@ def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = Fals
             history = history[:count]
         new_key, new_sid, source = _new_session_key(), uuid.uuid4().hex[:8], _session_source(session)
         try:
+            runtime_defaults = _branch_model_defaults(session)
             title = params.get("name", "") or _branch_title(db, old_key)
             home = session.get("profile_home")
             _persist_branch(db, new_key, old_key, title, history, source=source,
@@ -120,7 +126,7 @@ def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = Fals
         except Exception as e:
             return _err(rid, 5008, f"branch failed: {e}")
     try:
-        agent = _build_branch_agent(session, new_sid, new_key, history, source)
+        agent = _build_branch_agent(session, new_sid, new_key, history, source, runtime_defaults)
     except Exception as e:
         return _err(rid, 5000, f"agent init failed on branch: {e}")
     if idem_key is not None:

@@ -54,6 +54,12 @@ def build_kanban_policy(connection, params, config):
         if value:
             params_policy[name] = value
     private = {}
+    from gateway.run_model_presets import policy_preset_params
+    from hermes_cli.team_model_presets import PresetRoutingError
+    try:
+        params_policy = policy_preset_params(params_policy, config, authority.profile_id)
+    except PresetRoutingError as exc:
+        raise RuntimeStoreError('invalid_params', field='team_model_preset', detail=str(exc)) from exc
     policy = build_policy(params_policy, config, private_secrets=private)
     if policy.model is None:
         from gateway.run import _resolve_gateway_model

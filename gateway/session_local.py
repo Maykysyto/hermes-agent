@@ -300,6 +300,12 @@ def stage_local_session(authority, actor, params, *, trusted_policy=None, truste
         with profile_env_scope():  # an alias's ``key_env`` / ``${VAR}`` key reads the same .env
             config = load_profile_config()
             params = resolve_launch_route(params, config)
+            from gateway.run_model_presets import policy_preset_params
+            from hermes_cli.team_model_presets import PresetRoutingError
+            try:
+                params = policy_preset_params(params, config, authority.profile_id)
+            except PresetRoutingError as exc:
+                raise RuntimeStoreError('invalid_params', field='team_model_preset', detail=str(exc)) from exc
         # A client's session.create is the one caller whose named folder may select the coding posture.
         policy = build_policy(params, config, private_secrets=private_secrets, workspace_posture=True,
                               client_local=client_local)

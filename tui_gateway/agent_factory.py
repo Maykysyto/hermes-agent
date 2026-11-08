@@ -135,9 +135,12 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         str(composer_profile.get("model") or "").strip(),
         str(composer_profile.get("provider") or "").strip(),
     ) == _config_model_target()
-    if room_plumbing or (_row_follows_profile(row) and not composer_profile_matches):
+    snapshot = _session_preset_snapshot(model_config)
+    if snapshot is None and (room_plumbing or (_row_follows_profile(row) and not composer_profile_matches)):
         return {}
     overrides: dict = {}
+    if snapshot is not None:
+        overrides["team_model_preset"] = snapshot
     model = str(row.get("model") or model_config.get("model") or "").strip()
     # Canonical route reader shared with CLI --resume: nested ``gateway_runtime`` (the route the messaging
     # gateway last ran) before the TUI's top-level keys, then a routable ``billing_provider`` (#125942).
@@ -223,6 +226,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
     try:
         row = db.get_session(session_key) or {}
         model_config = _runtime_model_config(agent, _parse_model_config(row.get("model_config")))
+        if session.get("team_model_preset") is not None:
+            model_config["team_model_preset"] = session["team_model_preset"]
         if isinstance(composer_profile := session.get("composer_override_profile"), dict):
             model_config["composer_override_profile"] = composer_profile
         elif "composer_override_profile" in session:
@@ -630,7 +635,7 @@ def _make_agent(
     model_override: dict | str | None = None, provider_override: str | None = None,
     reasoning_config_override: dict | None = None, service_tier_override: str | None = None,
     platform_override: str | None = None, context_cwd_is_launch_artifact: bool | None = None,
-    cwd_override: str | None = None, auth_user_id: str | None = None):
+    cwd_override: str | None = None, auth_user_id: str | None = None, team_model_preset: dict | None = None):
     # AC-4 test seam: dead unless armed by the isolated certify harness.
     from tui_gateway.synthetic_turn import maybe_build_synthetic_agent
     synthetic = maybe_build_synthetic_agent(session_id or key, model_override)
@@ -648,7 +653,10 @@ def _make_agent(
     from agent.shell_hooks import register_from_config
     register_from_config(cfg)
     system_prompt = _startup_system_prompt(cfg, session_id or key)
+    model_override, provider_override, reasoning_config_override, preset_defaults = _preset_agent_defaults(
+        team_model_preset, model_override, provider_override, reasoning_config_override)
     model, runtime = _resolve_agent_model_runtime(model_override, provider_override)
+    reasoning_config_override = _preset_agent_reasoning(preset_defaults, model, runtime, reasoning_config_override)
     fallback_notice = runtime.pop("_fallback_notice", None)
     _pr = _load_provider_routing()
     platform = _resolve_agent_platform(platform_override)
